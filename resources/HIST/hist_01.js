@@ -312,11 +312,23 @@ async function runImportFlow() {
 
     const courses = parseScheduleHtml(html);
     if (!courses || courses.length === 0) {
-        window.shiguangBridge.showToast('未解析到课程，已弹出原始数据供排查。');
-        const debugHead = '解析失败。请把下面内容复制或截图发给开发者：\n\n'
-            + (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1200);
-        await window.shiguangBridgePromise.showAlert('解析失败-原始数据', debugHead, '知道了');
-        console.log('HIST: raw html head ->', html.slice(0, 2000));
+        window.shiguangBridge.showToast('未解析到课程，已弹出接口内容供排查。');
+        // 把接口返回的表格按“行: 各列”列出，便于对照真实列结构
+        let dbgText = '(无法解析接口HTML)' + String(html).slice(0, 300);
+        try {
+            const dbgDoc = new DOMParser().parseFromString(html, 'text/html');
+            const lines = [];
+            dbgDoc.querySelectorAll('tr').forEach((tr, ri) => {
+                const cells = Array.from(tr.querySelectorAll('td,th'))
+                    .map(td => (td.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+                if (cells.length) lines.push('R' + ri + ': ' + cells.join(' | '));
+            });
+            dbgText = lines.join('\n').slice(0, 3000) || '(表格为空)';
+        } catch (e) {
+            dbgText = '解析异常: ' + e.message + '\n' + String(html).slice(0, 500);
+        }
+        await window.shiguangBridgePromise.showAlert('解析失败-接口内容', dbgText, '知道了');
+        console.log('HIST: raw html ->', html.slice(0, 3000));
         return;
     }
 
