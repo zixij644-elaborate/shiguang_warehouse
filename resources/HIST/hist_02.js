@@ -1,29 +1,16 @@
 // 河南科技学院（青果 / KINGOSOFT 教务系统） 空闲教室查询 辅助工具
 //
-// 该功能依赖学校教务“空闲教室 / 教室使用情况”报表（需登录后访问）。
-//   1) 若已知报表 URL，粘贴后抓取解析；
-//   2) 已在教务页面打开该报表，可留空，脚本自动扫描当前页面及其 iframe。
+// 数据结构（真实导出"空闲教室一览表.xls"为 HTML）：
+//   - 一个导出对应"一个星期"，标题形如 "河南科技学院…空闲教室一览表 第1-18周 星期一"
+//   - 其后按 "校区：…/教室类型：…" 分组，每组一张 "教室|容量" 小表，列出该类型空闲教室
+//
+// 用法：登录教务系统打开"空闲教室一览表"页面后点击执行即可（支持 iframe），
+//       或用 URL 抓取。
 //
 // 适配者：@星河欲转 社区贡献（河南科技学院）
-// 提示：请在真机/开发者模式实测；若列项与预期不符，请根据日志更新识别规则。
+// 注意：请在开发者/真机模式实测；若页面结构与导出略有差异，可调整 collectFreeRooms。
 
-const HOST = 'http://jwgl.hist.edu.cn';
-// 若已知空闲教室报表地址，请填写（否则留空，脚本会扫描当前页面）
-const DEFAULT_FREE_URL = '';
-
-const DAY_NAMES = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
-const DAY_SHORT = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-
-function decodeText(buf) {
-    try {
-        const t = new TextDecoder('utf-8').decode(buf);
-        if (!t.includes('\uFFFD')) return t;
-    } catch (e) {}
-    try {
-        return new TextDecoder('gbk').decode(buf);
-    } catch (e) {}
-    return '';
-}
+const DAYS = '一二三四五六日';
 
 function isLoginPage() {
     const url = window.location.href;
@@ -32,164 +19,97 @@ function isLoginPage() {
     return false;
 }
 
-function looksLikeFreeTable(table) {
-    const text = (table.innerText || table.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!text) return false;
-    const hasDay = DAY_NAMES.some(d => text.indexOf(d) !== -1) || DAY_SHORT.some(d => text.indexOf(d) !== -1);
-    const hasSection = /节|\d{1,2}[-—～]\d{1,2}|\d{1,2}:\d{2}/.test(text);
-    const hasRoom = /室|楼|教|馆|房|阶|场/.test(text);
-    return hasDay && hasSection;
+function cellText(c) {
+    return (c.innerText || c.textContent || '').replace(/\s+/g, ' ').trim();
 }
 
-function searchFrames(root, depth) {
-    depth = depth || 0;
-    if (depth > 4) return [];
-    const results = [];
-    for (const t of Array.from(root.document.querySelectorAll('table'))) {
-        if (looksLikeFreeTable(t)) results.push(t);
-    }
-    for (const fr of Array.from(root.frames || [])) {
-        try {
-            if (!fr.document) continue;
-            results.push(...searchFrames(fr, depth + 1));
-        } catch (e) { /* 跨域忽略 */ }
-    }
-    return results;
-}
-
-function findFreeClassroomTable(root) {
-    return searchFrames(root)[0] || null;
-}
-
-// 找出包含“星期”列头的那一行（表头行），返回 星期 -> 列下标
-function dayColumnIndex(table) {
-    const rows = Array.from(table.querySelectorAll('tr'));
-    for (const row of rows) {
-        const cells = Array.from(row.children).map(c => (c.innerText || c.textContent || '').trim());
-        const map = {};
-        for (let i = 0; i < cells.length; i++) {
-            for (const d of DAY_NAMES) {
-                if (cells[i].indexOf(d) !== -1) { map[d] = i; }
-            }
-            for (const d of DAY_SHORT) {
-                if (cells[i].indexOf(d) !== -1 && !map[('星期' + d[1])]) { map['星期' + d[1]] = i; }
-            }
-        }
-        if (Object.keys(map).length >= 2) {
-            map.__headerRow = rows.indexOf(row);
-            return map;
-        }
-    }
-    return null;
-}
-
-function sectionRows(table, headerRowIndex) {
-    const rows = Array.from(table.querySelectorAll('tr'));
-    const map = [];
-    for (let i = (headerRowIndex != null ? headerRowIndex + 1 : 1); i < rows.length; i++) {
-        const first = rows[i].querySelector('td,th');
-        if (!first) continue;
-        const label = (first.innerText || '').trim();
-        if (label.indexOf('节') !== -1 || /^\d{1,2}/.test(label) || /\d{1,2}:\d{2}/.test(label)) {
-            map.push({ rowIndex: i, label });
-        }
-    }
-    return map;
-}
-
-function parseFreeClassrooms(table, dayName) {
-    const colMap = dayColumnIndex(table);
-    const col = colMap ? colMap[dayName] : null;
-    if (col === null) return null;
-    const rows = sectionRows(table, colMap.__headerRow);
+function allTables(root) {
     const out = [];
-    for (const r of rows) {
-        const row = table.querySelectorAll('tr')[r.rowIndex];
-        const cells = Array.from(row.children).map(td => (td.innerText || '').trim());
-        const cellText = cells[col] || '';
-        const classrooms = cellText.split(/[,，;；\s]+/).map(s => s.trim()).filter(Boolean);
-        out.push({ section: r.label, classrooms });
-    }
+    const scan = (r) => {
+        try {
+            for (const tb of Array.from(r.document.querySelectorAll('table'))) out.push(tb);
+            for (const fr of Array.from(r.frames || [])) { try { scan(fr); } catch (e) {} }
+        } catch (e) {}
+    };
+    scan(root);
     return out;
 }
 
-async function fetchFreePage(url) {
-    if (!url) return { text: null, mode: 'current' };
-    const resp = await fetch(url, { method: 'GET', credentials: 'include' });
-    const buf = await resp.arrayBuffer();
-    return { text: decodeText(buf), mode: 'url' };
+function isDataTable(table) {
+    const tr = table.querySelector('tr');
+    if (!tr) return false;
+    const hdr = Array.from(tr.children).map(cellText);
+    return hdr.some(h => h === '教室') && hdr.some(h => /容量/.test(h));
+}
+
+function collectRooms(table) {
+    const rooms = [];
+    const rows = Array.from(table.querySelectorAll('tr'));
+    for (const row of rows) {
+        const cells = Array.from(row.children).map(cellText);
+        // "教室|容量" 交替：偶数下标为教室名，奇数下标为容量
+        for (let i = 0; i < cells.length; i += 2) {
+            const r = cells[i];
+            if (r && r !== '教室') rooms.push(r);
+        }
+    }
+    return rooms;
 }
 
 async function runImportFlow() {
     if (isLoginPage()) {
-        window.shiguangBridge.showToast('请先登录教务系统，再打开空闲教室页面！');
+        window.shiguangBridge.showToast('请先登录教务系统，再打开“空闲教室一览表”页面！');
         return;
     }
 
     const confirmed = await window.shiguangBridgePromise.showAlert(
         '空闲教室查询',
-        DEFAULT_FREE_URL
-            ? '请先登录教务系统，然后点击开始查询（将抓取已配置报表）。'
-            : '请先在教务页面打开“空闲教室/教室使用情况”报表，确认表格已加载，然后点“开始查询”。',
+        '请在教务系统打开“空闲教室一览表”页面（选好星期后）再点“开始查询”。',
         '开始查询'
     );
     if (!confirmed) return;
 
-    const urlInput = await window.shiguangBridgePromise.showPrompt(
-        '空闲教室报表地址（可留空）',
-        '若已知报表 URL 请粘贴（留空则扫描当前页面/iframe）：',
-        DEFAULT_FREE_URL, ''
-    );
-    const url = (urlInput || '').trim();
-
-    const page = await fetchFreePage(url);
-    const holder = document.createElement('div');
-    if (page.mode === 'url') {
-        holder.innerHTML = page.text;
+    const tables = allTables(window);
+    let day = '';
+    let titleText = '';
+    for (const tb of tables) {
+        const t = tb.innerText || tb.textContent || '';
+        if (t.includes('空闲教室一览表')) {
+            titleText = t.replace(/\s+/g, ' ').trim();
+            const m = t.match(/星期([一二三四五六日])/);
+            if (m) day = m[1];
+            break;
+        }
     }
-
-    const table = page.mode === 'url'
-        ? findFreeClassroomTable(holder)
-        : findFreeClassroomTable(window);
-
-    if (!table) {
-        const cur = window.location.href;
-        window.shiguangBridge.showToast('未识别到空闲教室表格。若当前已打开报表，把地址栏 URL 复制后重试。');
-        console.log('HIST: 当前页 URL =', cur);
+    if (!titleText) {
+        window.shiguangBridge.showToast('未找到空闲教室报表，请确认已在“空闲教室一览表”页面。');
         return;
     }
 
-    // 如果是在当前页找到的，把 URL 提示用户（便于固定 DEFAULT_FREE_URL）
-    if (page.mode === 'current') {
-        window.shiguangBridge.showToast('已在当前页面找到报表，建议将地址保存为 DEFAULT_FREE_URL');
-        console.log('HIST: 报表 URL 候选 =', window.location.href);
+    const groups = [];
+    let currentType = '';
+    for (const tb of tables) {
+        const text = tb.innerText || tb.textContent || '';
+        const typeMatch = text.match(/教室类型[:：]\s*([^\s]+)/);
+        if (typeMatch) currentType = typeMatch[1].trim();
+        if (isDataTable(tb)) {
+            const rooms = collectRooms(tb);
+            if (rooms.length) groups.push({ type: currentType || '(未分类)', rooms });
+        }
     }
 
-    const colMap = dayColumnIndex(table);
-    if (!colMap || Object.keys(colMap).filter(k => k !== '__headerRow').length === 0) {
-        window.shiguangBridge.showToast('未能识别星期表头，请确认报表格式。');
-        return;
-    }
-    const days = DAY_NAMES.filter(d => colMap[d] !== undefined);
-
-    const dayIdx = await window.shiguangBridgePromise.showSingleSelection('选择星期', JSON.stringify(days), 0);
-    if (dayIdx === null || dayIdx === -1) return;
-    const dayName = days[dayIdx];
-
-    const parsed = parseFreeClassrooms(table, dayName) || [];
-    if (parsed.length === 0) {
-        window.shiguangBridge.showToast('该星期没有可解析的空闲教室数据。');
+    if (groups.length === 0) {
+        window.shiguangBridge.showToast('该报表里没有识别到教室列表。');
         return;
     }
 
-    let text = `【${dayName}】空闲教室\n\n`;
-    for (const p of parsed) {
-        const rooms = p.classrooms.length ? p.classrooms.join('  ') : '（无）';
-        text += `${p.section}：${rooms}\n`;
+    let out = '【星期' + (day || '?') + '】空闲教室\n\n';
+    for (const g of groups) {
+        out += g.type + '（' + g.rooms.length + ' 间）：\n  ' + g.rooms.join('　') + '\n';
     }
 
-    window.shiguangBridge.showToast('查询完成（来源：' + (page.mode === 'url' ? 'URL 报表' : '当前页面') + '）');
-    await window.shiguangBridgePromise.showAlert('空闲教室查询结果', text, '好的');
+    window.shiguangBridge.showToast('查询完成');
+    await window.shiguangBridgePromise.showAlert('空闲教室一览表', out, '好的');
     window.shiguangBridge.notifyTaskCompletion();
 }
 

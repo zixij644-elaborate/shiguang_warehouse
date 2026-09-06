@@ -28,28 +28,30 @@ function isLoginPage() {
 // ---------- token 解析 ----------
 
 function matchDay(text) {
-    const m = text.match(/(?:星期|周)([一二三四五六日天])/);
-    if (!m) return null;
-    return { day: DAY_MAP[m[1]] || 7, str: m[0] };
+    // 兼容 "星期四[1-2]" / "周四[1-2]" / "二[7-8]"（青果导出常为单个汉字）
+    let m = text.match(/(?:星期|周)([一二三四五六日天])/);
+    if (m) return { day: DAY_MAP[m[1]] || 7, str: m[1] };
+    m = text.match(/([一二三四五六日天])\s*\[/);
+    if (m) return { day: DAY_MAP[m[1]] || 7, str: m[1] };
+    return null;
 }
 
 function matchSection(text) {
-    // 找出“节次”：优先选“不是周次”的那组 [N-M] 或 N-M节。
-    // 通过全局匹配 + 后一个字符是否为“周”来排除形如 [1-8周] 的周次区间。
-    const re = /(?:\[|第)?\s*(\d{1,2})\s*[-—～]\s*(\d{1,2})\s*节?\s*\]?/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
+    // 优先匹配方括号内的节次（青果：星期一[7-8] / 二[7-8]）；方括号里的数字必为节次。
+    let m = text.match(/\[(\d{1,2})\s*[-—～]\s*(\d{1,2})\]/);
+    if (m) {
         const s = parseInt(m[1], 10), e = parseInt(m[2], 10);
-        if (s >= 1 && e >= s && e <= 30) {
-            const after = text.slice(re.lastIndex).match(/^\s*/)[0].length;
-            if (text[re.lastIndex + after] === '周') continue; // 这是周次，跳过
-            return { start: s, end: e, str: m[0] };
-        }
+        if (s >= 1 && e >= s && e <= 30) return { start: s, end: e, str: m[0] };
     }
-    const m2 = text.match(/(?:第)?\s*(\d{1,2})\s*节/);
-    if (m2) {
-        const s = parseInt(m2[1], 10);
-        if (s >= 1 && s <= 30) return { start: s, end: s, str: m2[0] };
+    m = text.match(/(\d{1,2})\s*[-—～]\s*(\d{1,2})\s*节/);
+    if (m) {
+        const s = parseInt(m[1], 10), e = parseInt(m[2], 10);
+        if (s >= 1 && e >= s && e <= 30) return { start: s, end: e, str: m[0] };
+    }
+    m = text.match(/(?:第)?\s*(\d{1,2})\s*节/);
+    if (m) {
+        const s = parseInt(m[1], 10);
+        if (s >= 1 && s <= 30) return { start: s, end: s, str: m[0] };
     }
     return null;
 }
@@ -90,40 +92,68 @@ function parseTimePlaceCell(text) {
         .replace(/／/g, '/').replace(/，/g, ',').replace(/；/g, ';')
         .replace(/\u3000/g, ' ').replace(/<[^>]+>/g, '');
 
-    const candidates = normalized.split(/[,\n;，；]/).map(s => s.trim()).filter(Boolean);
-    for (const cand of candidates) {
-        const dayTok = matchDay(cand);
-        const secTok = matchSection(cand);
-        if (!dayTok || !secTok) continue;
-        const weeks = matchWeeks(cand);
+    // 每个时段形如：周次 星期[节次] 地点；多个时段用逗号分隔。
+    // 用“周次 + 星期[节次]”为锚点整体捕获，避免把周次列表里的逗号（如 6-8,10周）误当成时段分隔。
+    const re = /(\S*周[^\s\[\]]*)\s*([一二三四五六日天])\s*\[(\d{1,2})\s*[-—～]\s*(\d{1,2})\]\s*([^,，;；\n]*)/g;
+    let m;
+    while ((m = re.exec(normalized)) !== null) {
+        const day = DAY_MAP[m[2]] || 7;
+        const start = parseInt(m[3], 10), end = parseInt(m[4], 10);
+        if (!(start >= 1 && end >= start && end <= 30)) continue;
+        const weeks = matchWeeks(m[1]);
         if (weeks.length === 0) continue;
-
-        // 逐个剔除 星期/周次/节次 标记，剩下的就是地点
-        let rest = cand;
-        rest = rest.replace(dayTok.str, ' ');
-        rest = rest.replace(secTok.str, ' ');
-        const wkM = rest.match(/[\d,，\-—～]+[()（）单双]*\s*周/);
-        if (wkM) rest = rest.replace(wkM[0], ' ');
-        rest = rest.replace(/[\[\]()（）]/g, ' ')
+        let position = (m[5] || '')
+            .replace(/\((\d+)\)\s*$/, '') // 去掉结尾教室容量 "(98)"
+            .replace(/[\[\]()（）]/g, ' ')
             .replace(/[,，;；\/]/g, ' ')
+            .replace(/单|双/g, ' ')
             .replace(/\s+/g, ' ').trim();
-        const position = (rest === '' || /^\d+$/.test(rest)) ? '' : rest;
-
-        items.push({ day: dayTok.day, startSection: secTok.start, endSection: secTok.end, weeks, position });
+        if (position === '' || /^\d+$/.test(position)) position = '';
+        items.push({ day, startSection: start, endSection: end, weeks, position });
     }
 
-    // 青果同一行可能只在结尾写一次地点（如 "星期二…,星期四… 外语楼203"），
-    // 让前面缺地点的课块继承该地点。
+    // 兜底：若某时段缺地点，而同行后面的时段有地点，则继承该地点
     const lastPos = items.map(i => i.position).filter(p => p).slice(-1)[0] || '';
     if (lastPos) {
-        for (const it of items) {
-            if (!it.position) it.position = lastPos;
-        }
+        for (const it of items) if (!it.position) it.position = lastPos;
     }
     return items;
 }
 
 // ---------- HTML 解析 ----------
+
+// 清理教师串：格式 "[工号]姓名 [工号]姓名 …" → "姓名 & 姓名"
+function cleanTeacher(t) {
+    const name = t.split('[').map(part => {
+        const idx = part.indexOf(']');
+        return idx >= 0 ? part.slice(idx + 1).replace(/&ensp;|&nbsp;/g, ' ').trim() : '';
+    }).filter(Boolean).join(' & ');
+    return name || t.trim();
+}
+
+function findNameAndTeacher(cells, dataIdx) {
+    let name = '', teacher = '', nameIdx = -1;
+    // 课程名：形如 [xxx]课程名
+    for (let i = 0; i < cells.length; i++) {
+        if (i === dataIdx) continue;
+        const t = (cells[i]?.textContent || '').trim();
+        if (/^\s*\[[^\]]*\]\s*\S/.test(t)) {
+            name = t.replace(/^\s*\[[^\]]*\]\s*/g, '').trim();
+            nameIdx = i;
+            break;
+        }
+    }
+    // 教师：形如 [工号]姓名 …（含 [工号] 且不是课程名）
+    for (let i = 0; i < cells.length; i++) {
+        if (i === dataIdx || i === nameIdx) continue;
+        const t = (cells[i]?.textContent || '').trim();
+        if (/\d/.test(t) && /\[[^\]]*\]\s*/.test(t)) {
+            const ct = cleanTeacher(t);
+            if (ct) { teacher = ct; break; }
+        }
+    }
+    return { name, teacher };
+}
 
 function parseScheduleHtml(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -135,27 +165,27 @@ function parseScheduleHtml(html) {
         if (cells.length < 3) continue;
 
         let dataCell = null;
+        let dataIdx = -1;
         for (let i = cells.length - 1; i >= 0; i--) {
             const t = cells[i].textContent || '';
-            if (/\d+\s*[-—～]\s*\d+\s*(节|周)/.test(t) || (/节/.test(t) && /周/.test(t))) {
+            // 时间地点单元格特征：含“周”（周次）或方括号节次 [N-M]，或“星期X[”/“X[”
+            if (/周/.test(t) || /\[(\d{1,2})\s*[-—～]\s*(\d{1,2})\]/.test(t) || /[一二三四五六日天]\s*\[/.test(t)) {
                 dataCell = t;
+                dataIdx = i;
                 break;
             }
         }
         if (dataCell === null) continue;
 
-        let name = (cells[1]?.textContent || '').trim() || (cells[0]?.textContent || '').trim();
+        // 课程名与教师采用“按内容识别”，对导出/接口两种列布局都健壮：
+        //   课程名单元格形如 "[2500T0002]大学生心理健康教育"
+        //   教师单元格形如 "[201201059]贾普君 [202201013]李金璐"
+        const info = findNameAndTeacher(cells, dataIdx);
+        let name = info.name;
+        if (!name) name = (cells[2]?.textContent || '').trim() || (cells[1]?.textContent || '').trim() || (cells[0]?.textContent || '').trim();
         name = name.replace(/^\s*\[[^\]]*\]\s*/g, '').trim();
         if (!name) continue;
-
-        let teacher = '';
-        for (const idx of [5, 4, 3]) {
-            const t = (cells[idx]?.textContent || '').trim();
-            if (t && !/\d+\s*[-—～]\s*\d+\s*(节|周)/.test(t)) {
-                teacher = t.replace(/^\[[^\]]*\]\s*/g, '').trim();
-                if (teacher) break;
-            }
-        }
+        const teacher = info.teacher;
 
         const items = parseTimePlaceCell(String(dataCell));
         for (const it of items) {
