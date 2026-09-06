@@ -157,7 +157,7 @@ function findNameAndTeacher(cells, dataIdx) {
 
 function parseScheduleHtml(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const rows = doc.querySelectorAll('tbody tr');
+    const rows = doc.querySelectorAll('tr');
     const courses = [];
 
     for (const tr of rows) {
@@ -312,8 +312,11 @@ async function runImportFlow() {
 
     const courses = parseScheduleHtml(html);
     if (!courses || courses.length === 0) {
-        window.shiguangBridge.showToast('未解析到课程，可能是表格结构已变更或本学期无课。');
-        console.log('HIST: raw html head ->', html.slice(0, 800));
+        window.shiguangBridge.showToast('未解析到课程，已弹出原始数据供排查。');
+        const debugHead = '解析失败。请把下面内容复制或截图发给开发者：\n\n'
+            + (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1200);
+        await window.shiguangBridgePromise.showAlert('解析失败-原始数据', debugHead, '知道了');
+        console.log('HIST: raw html head ->', html.slice(0, 2000));
         return;
     }
 
