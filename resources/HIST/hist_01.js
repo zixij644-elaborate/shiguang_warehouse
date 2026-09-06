@@ -111,6 +111,15 @@ function parseTimePlaceCell(text) {
 
         items.push({ day: dayTok.day, startSection: secTok.start, endSection: secTok.end, weeks, position });
     }
+
+    // 青果同一行可能只在结尾写一次地点（如 "星期二…,星期四… 外语楼203"），
+    // 让前面缺地点的课块继承该地点。
+    const lastPos = items.map(i => i.position).filter(p => p).slice(-1)[0] || '';
+    if (lastPos) {
+        for (const it of items) {
+            if (!it.position) it.position = lastPos;
+        }
+    }
     return items;
 }
 
