@@ -273,26 +273,62 @@ async function fetchScheduleHtml(academicYear, semesterIndex) {
     return text;
 }
 
-async function importTimeSlots() {
-    const summer = [
+// 内置备用作息：key 0=第一学期(2026-2027实测), 1=第二学期(旧版兜底，仅抓取失败时用)
+const FALLBACK_TIMES = {
+    0: [
         { number: 1, startTime: '08:00', endTime: '08:45' }, { number: 2, startTime: '08:55', endTime: '09:40' },
-        { number: 3, startTime: '10:00', endTime: '10:45' }, { number: 4, startTime: '10:55', endTime: '11:40' },
+        { number: 3, startTime: '10:10', endTime: '10:55' }, { number: 4, startTime: '11:05', endTime: '11:50' },
         { number: 5, startTime: '15:00', endTime: '15:45' }, { number: 6, startTime: '15:55', endTime: '16:40' },
         { number: 7, startTime: '17:10', endTime: '17:55' }, { number: 8, startTime: '18:05', endTime: '18:50' },
         { number: 9, startTime: '20:00', endTime: '20:45' }, { number: 10, startTime: '20:55', endTime: '21:40' }
-    ];
-    const winter = [
+    ],
+    1: [
         { number: 1, startTime: '08:00', endTime: '08:45' }, { number: 2, startTime: '08:55', endTime: '09:40' },
         { number: 3, startTime: '10:10', endTime: '10:55' }, { number: 4, startTime: '11:05', endTime: '11:50' },
         { number: 5, startTime: '14:30', endTime: '15:15' }, { number: 6, startTime: '15:25', endTime: '16:10' },
         { number: 7, startTime: '16:40', endTime: '17:25' }, { number: 8, startTime: '17:35', endTime: '18:20' },
         { number: 9, startTime: '19:30', endTime: '20:15' }, { number: 10, startTime: '20:25', endTime: '21:10' }
-    ];
-    const options = ['夏季作息', '冬季作息'];
-    const idx = await window.shiguangBridgePromise.showSingleSelection('选择作息时间', JSON.stringify(options), 0);
-    const slots = idx === 1 ? winter : summer;
-    await window.shiguangBridgePromise.savePresetTimeSlots(JSON.stringify(slots));
-    return slots;
+    ]
+};
+
+// 解析教务作息页表格：节次行形如 ["1","08:00","08:45"] 或 ["上午","1","08:00","08:45"]
+function parseTimetableHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const out = [];
+    for (const tr of doc.querySelectorAll('tr')) {
+        const cells = Array.from(tr.querySelectorAll('td,th'))
+            .map(c => (c.textContent || '').trim()).filter(c => c !== '');
+        let num = parseInt(cells[0] || '', 10);
+        if (isNaN(num)) num = parseInt(cells[1] || '', 10);
+        let start = '', end = '';
+        for (let i = 1; i < cells.length; i++) {
+            if (/^\d{2}:\d{2}$/.test(cells[i])) {
+                if (!start) start = cells[i];
+                else if (!end) { end = cells[i]; break; }
+            }
+        }
+        if (num >= 1 && num <= 30 && start && end) out.push({ number: num, startTime: start, endTime: end });
+    }
+    const map = new Map();
+    out.forEach(s => { if (!map.has(s.number)) map.set(s.number, s); });
+    return Array.from(map.values()).sort((a, b) => a.number - b.number);
+}
+
+// 动态抓取教务公布的当学期作息（公开同源接口，免登录）
+async function fetchTermTimeSlots(year, xq) {
+    const url = HOST + '/public/SchoolTimetable.show.jsp';
+    const body = 'xn=' + year + '&xq_m=' + xq + '&menucode=&is_ssxq=0&axq=&ssxq=';
+    const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: body,
+        credentials: 'include'
+    });
+    const buf = await resp.arrayBuffer();
+    const text = decodeBest(buf);
+    if (text.includes('未设置') || text.includes('未设定') || text.includes('未发布')) return null;
+    const slots = parseTimetableHtml(text);
+    return slots.length ? slots : null;
 }
 
 async function runImportFlow() {
@@ -316,29 +352,27 @@ async function runImportFlow() {
 
     const courses = parseScheduleHtml(html);
     if (!courses || courses.length === 0) {
-        window.shiguangBridge.showToast('未解析到课程，已弹出接口内容供排查。');
-        // 把接口返回的表格按“行: 各列”列出，便于对照真实列结构
-        let dbgText = '(无法解析接口HTML)' + String(html).slice(0, 300);
-        try {
-            const dbgDoc = new DOMParser().parseFromString(html, 'text/html');
-            const lines = [];
-            dbgDoc.querySelectorAll('tr').forEach((tr, ri) => {
-                const cells = Array.from(tr.querySelectorAll('td,th'))
-                    .map(td => (td.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
-                if (cells.length) lines.push('R' + ri + ': ' + cells.join(' | '));
-            });
-            dbgText = lines.join('\n').slice(0, 3000) || '(表格为空)';
-        } catch (e) {
-            dbgText = '解析异常: ' + e.message + '\n' + String(html).slice(0, 500);
-        }
-        await window.shiguangBridgePromise.showAlert('解析失败-接口内容', dbgText, '知道了');
-        console.log('HIST: raw html ->', html.slice(0, 3000));
+        window.shiguangBridge.showToast('未解析到课程，可能是本学期无课或页面结构已变化。');
+        console.log('HIST: raw html head ->', (html || '').slice(0, 1200));
         return;
     }
 
     await window.shiguangBridgePromise.saveImportedCourses(JSON.stringify(courses, null, 2));
     window.shiguangBridge.showToast(`课程解析成功：${courses.length} 条`);
-    await importTimeSlots();
+
+    // 作息与学年学期强相关：合并为一步，按所选学期自动抓取教务公布作息；失败用内置备用并提示
+    const xq = semIdx === 0 ? 0 : 1;
+    const termName = xq === 0 ? '第一学期' : '第二学期';
+    let slots = null;
+    try { slots = await fetchTermTimeSlots(year, xq); } catch (e) { slots = null; }
+    if (slots && slots.length) {
+        await window.shiguangBridgePromise.savePresetTimeSlots(JSON.stringify(slots));
+        window.shiguangBridge.showToast(`已按 ${year}-${year + 1} 学年${termName}作息导入`);
+    } else {
+        const fallback = FALLBACK_TIMES[xq] || FALLBACK_TIMES[0];
+        await window.shiguangBridgePromise.savePresetTimeSlots(JSON.stringify(fallback));
+        window.shiguangBridge.showToast(`未能获取学校${termName}作息（可能未发布），已用备用作息，请核对`);
+    }
     window.shiguangBridge.showToast(`导入完成，共 ${courses.length} 门课程！`);
     window.shiguangBridge.notifyTaskCompletion();
 }
