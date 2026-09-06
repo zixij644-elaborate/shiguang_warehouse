@@ -243,6 +243,19 @@ async function selectSemester() {
     return await window.shiguangBridgePromise.showSingleSelection('选择学期', JSON.stringify(semesters), 0);
 }
 
+// 自动判断响应编码：UTF-8 与 GBK 二选一（谁替换字符少、中文多就用谁）
+function decodeBest(buf) {
+    const utf8 = (() => { try { return new TextDecoder('utf-8').decode(buf); } catch (e) { return ''; } })();
+    const gbk = (() => { try { return new TextDecoder('gbk').decode(buf); } catch (e) { return null; } })();
+    const repl = s => (s.match(/\uFFFD/g) || []).length;
+    const cjk = s => (s.match(/[\u4e00-\u9fa5]/g) || []).length;
+    if (gbk == null) return utf8;
+    if (repl(utf8) === 0 && repl(gbk) > 0) return utf8;
+    if (repl(gbk) === 0 && repl(utf8) > 0) return gbk;
+    if (cjk(gbk) > cjk(utf8)) return gbk;
+    return repl(gbk) < repl(utf8) ? gbk : utf8;
+}
+
 async function fetchScheduleHtml(academicYear, semesterIndex) {
     const xq = semesterIndex === 0 ? 0 : 1;
     const params = base64Encode(`xn=${academicYear}&xq=${xq}`);
@@ -252,17 +265,8 @@ async function fetchScheduleHtml(academicYear, semesterIndex) {
 
     const resp = await fetch(url, { method: 'GET', credentials: 'include' });
     const buf = await resp.arrayBuffer();
-    let text = null;
-    try { text = new TextDecoder('utf-8').decode(buf); } catch (e) {}
-    const hasReplacement = text && text.includes('\uFFFD');
-    const hasLoginMarker = text && (text.includes('凭证已失效') || text.includes('请重新登录'));
-    if (hasReplacement || !text || hasLoginMarker) {
-        try {
-            const gbk = new TextDecoder('gbk').decode(buf);
-            if (gbk && /星期[一二三四五六日]/.test(gbk)) text = gbk;
-        } catch (e) {}
-    }
-    if (hasLoginMarker) {
+    const text = decodeBest(buf);
+    if (text.includes('凭证已失效') || text.includes('请重新登录')) {
         window.shiguangBridge.showToast('请先登录教务系统！');
         return null;
     }
